@@ -26,47 +26,47 @@ class HybridPredictor:
 
     def prepare_data(self, df):
         """Prepares features (X) and target (y) with robust cleaning"""
-        # 1. Define Features
         feature_cols = ['Close', 'RSI', 'MACD', 'EMA_20']
         if 'Sentiment' in df.columns:
             feature_cols.append('Sentiment')
         
-        # 2. Safety Check: Ensure columns exist
-        missing_cols = [c for c in feature_cols if c not in df.columns]
-        if missing_cols:
-            raise ValueError(f"Missing columns in data: {missing_cols}")
+        # Validation
+        missing = [c for c in feature_cols if c not in df.columns]
+        if missing:
+            raise ValueError(f"Missing columns: {missing}")
 
-        # 3. Clean Data (Handle Infinite and NaNs)
-        # Create a copy to avoid SettingWithCopy warnings
-        data_df = df[feature_cols + ['Close']].copy() 
-        
-        # Replace Infinity with NaN and drop all NaNs
+        # Clean Data
+        data_df = df[feature_cols + ['Close']].copy()
         data_df.replace([np.inf, -np.inf], np.nan, inplace=True)
         data_df.dropna(inplace=True)
 
         if len(data_df) < 10:
-             st.error(f"Not enough data points after cleaning. Found {len(data_df)} rows. Need at least 10.")
+             st.error(f"Not enough data points. Need at least 10, found {len(data_df)}.")
              st.stop()
 
-        # 4. separate X (Features) and y (Target)
-        # We use the current day's features to predict the NEXT day's Close
-        # So X is rows [0 to N-1], y is Close [1 to N]
-        
-        X_raw = data_df[feature_cols].values[:-1]  # All rows except last
-        y_raw = data_df['Close'].values[1:]        # All rows except first (shifted -1)
+        # Shift Data (Use Today's features to predict Tomorrow's Close)
+        X_raw = data_df[feature_cols].values[:-1]
+        y_raw = data_df['Close'].values[1:]
 
-        # Reshape y for scaler
+        # Reshape for Scaler
         y_raw = y_raw.reshape(-1, 1)
 
-        # 5. Scale
+        # Scale
         X_scaled = self.scaler_X.fit_transform(X_raw)
         y_scaled = self.scaler_y.fit_transform(y_raw)
         
         return X_scaled, y_scaled.flatten()
 
     def train(self, X, y):
-        # Basic split
+        # Ensure sufficient data for split
+        if len(X) < 5:
+            return 0.0, np.array([]), np.array([])
+
         split = int(len(X) * 0.8)
+        # Ensure test set has at least 1 sample
+        if split >= len(X):
+            split = len(X) - 1
+
         X_train, X_test = X[:split], X[split:]
         y_train, y_test = y[:split], y[split:]
 
@@ -75,14 +75,14 @@ class HybridPredictor:
         params = {
             'objective': 'regression', 
             'metric': 'rmse', 
-            'learning_rate': 0.05,
+            'learning_rate': 0.05, 
             'verbosity': -1,
-            'min_data_in_leaf': 2  # Added to prevent errors on small datasets
+            'min_data_in_leaf': 2
         }
         self.lgb_model = lgb.train(params, lgb_train, num_boost_round=500)
 
         # --- Train LSTM ---
-        X_train_t = torch.FloatTensor(X_train).unsqueeze(1) 
+        X_train_t = torch.FloatTensor(X_train).unsqueeze(1)
         y_train_t = torch.FloatTensor(y_train).view(-1, 1)
         
         self.lstm_model = LSTMNet(input_dim=X.shape[1])
@@ -99,23 +99,35 @@ class HybridPredictor:
         return self.evaluate(X_test, y_test)
 
     def evaluate(self, X_test, y_test):
-        # LightGBM
-        lgb_pred_scaled = self.lgb_model.predict(X_test)
+        # 1. LightGBM Prediction
+        lgb_pred_scaled = self.lgb_model.predict(X_test).flatten()
         
-        # LSTM
+        # 2. LSTM Prediction
         X_test_t = torch.FloatTensor(X_test).unsqueeze(1)
         self.lstm_model.eval()
         with torch.no_grad():
-            lstm_pred_scaled = self.lstm_model(X_test_t).numpy().flatten()
+            # Added .detach() for safety
+            lstm_pred_scaled = self.lstm_model(X_test_t).detach().numpy().flatten()
         
-        # Ensemble
+        # 3. Ensemble (Weighted Average)
+        # Ensure shapes match before averaging
+        min_len = min(len(lgb_pred_scaled), len(lstm_pred_scaled))
+        lgb_pred_scaled = lgb_pred_scaled[:min_len]
+        lstm_pred_scaled = lstm_pred_scaled[:min_len]
+        
         final_pred_scaled = (self.alpha * lstm_pred_scaled) + ((1 - self.alpha) * lgb_pred_scaled)
         
-        # Inverse Scale
+        # 4. Inverse Scale
         final_pred_real = self.scaler_y.inverse_transform(final_pred_scaled.reshape(-1, 1)).flatten()
+        
+        # Handle y_test (reshape -> inverse -> flatten)
+        # Ensure y_test matches the length of predictions (in case of truncation above)
+        y_test = y_test[:min_len]
         y_test_real = self.scaler_y.inverse_transform(y_test.reshape(-1, 1)).flatten()
         
+        # 5. RMSE Calculation
         rmse = np.sqrt(np.mean((y_test_real - final_pred_real)**2))
+        
         return rmse, final_pred_real, y_test_real
 
     def predict_next(self, current_features):
@@ -126,7 +138,7 @@ class HybridPredictor:
         lstm_feat = torch.FloatTensor(scaled_feat).unsqueeze(1)
         self.lstm_model.eval()
         with torch.no_grad():
-            lstm_p = self.lstm_model(lstm_feat).item()
+            lstm_p = self.lstm_model(lstm_feat).detach().item()
         
         final_p_scaled = (self.alpha * lstm_p) + ((1 - self.alpha) * lgb_p)
         final_p_real = self.scaler_y.inverse_transform([[final_p_scaled]])[0][0]
