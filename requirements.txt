@@ -1,0 +1,11 @@
+streamlit
+yfinance
+pandas
+numpy
+torch
+transformers
+lightgbm
+scikit-learn
+plotly
+newsapi-python
+python-dotenv
