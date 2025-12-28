@@ -14,6 +14,13 @@ class DataPipeline:
     def fetch_stock_data(self, ticker, period="1y"):
         """Fetches OHLCV data from Yahoo Finance"""
         df = yf.download(ticker, period=period)
+        
+        # --- FIX: FLATTEN MULTI-INDEX COLUMNS ---
+        # yfinance often returns columns like ('Close', 'AAPL'). We want just 'Close'.
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        # ----------------------------------------
+
         df.reset_index(inplace=True)
         return df
 
@@ -42,34 +49,43 @@ class DataPipeline:
 
     def fetch_and_analyze_news(self, ticker, days=29):
         """
-        Fetches news (Free NewsAPI is limited to ~1 month) and calculates Sentiment.
+        Fetches news and calculates Sentiment.
         Returns a DataFrame with Date and Sentiment_Score.
         """
-        # Note: NewsAPI free tier strictly limits historical access
-        all_articles = self.news_api.get_everything(q=ticker,
-                                                  language='en',
-                                                  sort_by='relevancy',
-                                                  page_size=50) # Limit to save processing time
-        
-        sentiments = []
-        dates = []
-
-        for article in all_articles['articles']:
-            title = article['title']
-            pub_date = article['publishedAt'][:10] # YYYY-MM-DD
+        try:
+            # Note: NewsAPI free tier strictly limits historical access
+            all_articles = self.news_api.get_everything(q=ticker,
+                                                      language='en',
+                                                      sort_by='relevancy',
+                                                      page_size=50)
             
-            # FinBERT Prediction
-            result = self.sentiment_pipe(title)[0]
-            score = result['score']
-            if result['label'] == 'negative': score *= -1
-            elif result['label'] == 'neutral': score = 0
-            
-            sentiments.append(score)
-            dates.append(pub_date)
+            sentiments = []
+            dates = []
 
-        news_df = pd.DataFrame({'Date': dates, 'Sentiment': sentiments})
-        news_df['Date'] = pd.to_datetime(news_df['Date'])
-        
-        # Aggregate sentiment by day (mean score)
-        daily_sentiment = news_df.groupby('Date').mean().reset_index()
-        return daily_sentiment
+            if not all_articles.get('articles'):
+                return pd.DataFrame(columns=['Date', 'Sentiment'])
+
+            for article in all_articles['articles']:
+                title = article['title']
+                pub_date = article['publishedAt'][:10] # YYYY-MM-DD
+                
+                if title: # Ensure title is not None
+                    # FinBERT Prediction
+                    result = self.sentiment_pipe(title)[0]
+                    score = result['score']
+                    if result['label'] == 'negative': score *= -1
+                    elif result['label'] == 'neutral': score = 0
+                    
+                    sentiments.append(score)
+                    dates.append(pub_date)
+
+            news_df = pd.DataFrame({'Date': dates, 'Sentiment': sentiments})
+            news_df['Date'] = pd.to_datetime(news_df['Date'])
+            
+            # Aggregate sentiment by day (mean score)
+            daily_sentiment = news_df.groupby('Date').mean().reset_index()
+            return daily_sentiment
+
+        except Exception as e:
+            st.error(f"Error fetching news: {e}")
+            return pd.DataFrame(columns=['Date', 'Sentiment'])
