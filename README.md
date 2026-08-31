@@ -1,4 +1,4 @@
-# 📈 FinSentStock: News Sentiment to Predict Short-Term Stock Movement
+# 📈 FinSentStock: News Sentiment to Predict Short-Term Stock Movement(In Development).
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue)
 ![Framework](https://img.shields.io/badge/Framework-PyTorch%20%7C%20LightGBM-orange)
